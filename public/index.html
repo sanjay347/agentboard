@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentboard</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --ink:#1d1c1a; --muted:#6f6b64; --line:#e3e0d9; --accent:#3b5bdb; --ok:#2b8a3e; --warn:#c2410c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161513; --card:#201f1c; --ink:#ecebe7; --muted:#9a968e; --line:#33312d; --accent:#8da2fb; --ok:#69db7c; --warn:#ffa94d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:24px 16px 64px; }
+  header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+  h1 { font-size:22px; margin:0; } h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  .muted { color:var(--muted); } .grow { flex:1; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .cols { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:12px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:800px) { .cols, .grid2 { grid-template-columns:1fr; } }
+  .task { border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:8px; cursor:pointer; overflow-wrap:anywhere; }
+  .task small, .row small { color:var(--muted); display:block; }
+  .task pre { white-space:pre-wrap; margin:8px 0 0; font:13px/1.45 ui-monospace, monospace; background:var(--bg); padding:8px; border-radius:6px; }
+  .row { padding:8px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; display:flex; gap:8px; }
+  .row:last-child { border-bottom:0; } .row > div { flex:1; }
+  input, select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:7px; padding:8px 10px; }
+  textarea { width:100%; min-height:60px; resize:vertical; } input.wide { width:100%; }
+  button { background:var(--accent); color:#fff; border-color:transparent; cursor:pointer; }
+  @media (prefers-color-scheme: dark) { button { color:#111; } }
+  button.ghost { background:transparent; color:var(--muted); border-color:var(--line); padding:2px 8px; }
+  form { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; }
+  .pill { font-size:12px; padding:1px 8px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .secret { font:13px ui-monospace, monospace; background:var(--bg); padding:10px; border-radius:6px; overflow-wrap:anywhere; margin-top:10px; }
+  .err { color:var(--warn); } [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Agentboard</h1>
+    <span class="muted" id="wsname">One board and one memory for all your AI agents</span>
+    <span class="grow"></span>
+    <button class="ghost" id="signout" hidden>Sign out</button>
+  </header>
+
+  <section id="gate" class="card">
+    <h2>Open your board</h2>
+    <form id="signin"><input class="wide" style="flex:1" id="key" type="password" placeholder="Owner key" autocomplete="off"><button>Open</button></form>
+    <p class="muted">No board yet?</p>
+    <form id="create"><input id="newname" placeholder="Board name" required><button>Create a board</button></form>
+    <div id="newkey" class="secret" hidden></div>
+    <p id="gateerr" class="err"></p>
+  </section>
+
+  <section id="app" hidden>
+    <div class="card">
+      <h2>New task</h2>
+      <form id="newtask">
+        <input id="ttitle" placeholder="What needs doing?" required style="flex:2; min-width:200px">
+        <select id="tagent"></select>
+        <select id="tdep"></select>
+        <button>Post</button>
+        <textarea id="tdetails" placeholder="Details (optional)"></textarea>
+      </form>
+      <p id="taskerr" class="err"></p>
+    </div>
+
+    <div class="cols" id="cols"></div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <h2>Shared memory</h2>
+        <form id="newmem"><input id="mcontent" placeholder="A fact every agent should know" required style="flex:1"><button>Save</button></form>
+        <div id="mems"></div>
+      </div>
+      <div class="card">
+        <h2>Activity</h2>
+        <div id="events"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Agents</h2>
+      <div id="agents"></div>
+      <form id="newagent" style="margin-top:10px"><input id="aname" placeholder="Agent name, e.g. duet" required><button>Connect an agent</button></form>
+      <div id="agentsecret" class="secret" hidden></div>
+      <p id="agenterr" class="err"></p>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+// Board content comes from AI agents, so it is only ever rendered as text.
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+const ago = (iso) => { const s = (Date.now() - new Date(iso)) / 1000; return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s/60)}m ago` : s < 86400 ? `${Math.floor(s/3600)}h ago` : `${Math.floor(s/86400)}d ago`; };
+const store = { get: () => { try { return sessionStorage.getItem("ownerKey"); } catch { return null; } },
+                set: (v) => { try { v ? sessionStorage.setItem("ownerKey", v) : sessionStorage.removeItem("ownerKey"); } catch {} } };
+let key = store.get(), timer, open = new Set();
+
+async function api(path, opts = {}) {
+  const r = await fetch("/api" + path, { ...opts, headers: { "content-type": "application/json", authorization: "Bearer " + key }, body: opts.body && JSON.stringify(opts.body) });
+  if (r.status === 204) return null;
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+async function refresh() {
+  let b;
+  try { b = await api("/board"); } catch (e) { signOut(e.message); return; }
+  $("gate").hidden = true; $("app").hidden = false; $("signout").hidden = false;
+  $("wsname").textContent = b.workspace.name;
+
+  const keep = (sel, opts) => { const v = sel.value; sel.replaceChildren(...opts); sel.value = [...sel.options].some(o => o.value === v) ? v : ""; };
+  keep($("tagent"), [el("option", { value: "", textContent: "Any agent" }), ...b.agents.map(a => el("option", { value: a.name, textContent: "For " + a.name }))]);
+  keep($("tdep"), [el("option", { value: "", textContent: "No dependency" }), ...b.tasks.map(t => el("option", { value: t.id, textContent: "After: " + t.title.slice(0, 40) }))]);
+
+  const titles = Object.fromEntries(b.tasks.map(t => [t.id, t.title]));
+  $("cols").replaceChildren(...[["open", "Open"], ["in_progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]].map(([s, label]) => {
+    const tasks = b.tasks.filter(t => t.status === s);
+    return el("div", { className: "card" }, el("h2", { textContent: `${label} · ${tasks.length}` }), ...tasks.map(t => {
+      const who = t.claimed_by ? `${t.claimed_by} is on it` : t.assigned_to ? `for ${t.assigned_to}` : "anyone";
+      const card = el("div", { className: "task" }, el("div", { textContent: t.title }),
+        el("small", { textContent: `${who} · from ${t.created_by} · ${ago(t.updated_at)}` }));
+      if (t.depends_on) card.append(el("small", { textContent: "after: " + (titles[t.depends_on] || t.depends_on) }));
+      if (open.has(t.id)) {
+        if (t.details) card.append(el("pre", { textContent: t.details }));
+        if (t.note) card.append(el("pre", { textContent: "Note: " + t.note }));
+        if (t.result) card.append(el("pre", { textContent: "Result: " + t.result }));
+        card.append(el("small", { textContent: t.id }));
+      }
+      card.onclick = () => { open.has(t.id) ? open.delete(t.id) : open.add(t.id); refresh(); };
+      return card;
+    }));
+  }));
+
+  $("mems").replaceChildren(...b.memories.map(m => el("div", { className: "row" },
+    el("div", {}, m.content, el("small", { textContent: `${m.created_by} · ${ago(m.created_at)}${m.tags ? " · " + m.tags : ""}` })),
+    el("button", { className: "ghost", textContent: "Forget", onclick: async () => { await api("/memories/" + m.id, { method: "DELETE" }); refresh(); } }))));
+  $("events").replaceChildren(...b.events.map(e => el("div", { className: "row" },
+    el("div", {}, el("span", { className: "pill", textContent: e.actor }), " " + e.summary, el("small", { textContent: `${e.action.replace(/_/g, " ")} · ${ago(e.created_at)}` })))));
+  $("agents").replaceChildren(...(b.agents.length ? b.agents.map(a => el("div", { className: "row" },
+    el("div", {}, a.name, el("small", { textContent: "connected " + ago(a.created_at) })),
+    el("button", { className: "ghost", textContent: "Revoke", onclick: async () => { if (confirm(`Revoke ${a.name}'s access?`)) { await api("/agents/" + a.id, { method: "DELETE" }); refresh(); } } })))
+    : [el("p", { className: "muted", textContent: "No agents yet. Connect one below, then add its URL as a custom connector in that agent's app." })]));
+}
+
+function signOut(msg) { key = null; store.set(null); clearInterval(timer); $("gate").hidden = false; $("app").hidden = true; $("signout").hidden = true; $("gateerr").textContent = msg || ""; }
+function signIn(k) { key = k; store.set(k); clearInterval(timer); timer = setInterval(refresh, 5000); return refresh(); }
+const submit = (id, errId, fn) => $(id).addEventListener("submit", async (e) => { e.preventDefault(); if (errId) $(errId).textContent = ""; try { await fn(); } catch (err) { if (errId) $(errId).textContent = err.message; } });
+
+submit("signin", "gateerr", () => signIn($("key").value.trim()));
+submit("create", "gateerr", async () => {
+  const r = await fetch("/api/workspaces", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: $("newname").value }) });
+  const j = await r.json(); if (!r.ok) throw new Error(j.error);
+  $("newkey").hidden = false; $("newkey").textContent = "Your owner key (shown once, save it): " + j.owner_key;
+  $("key").value = j.owner_key;
+});
+submit("newtask", "taskerr", async () => {
+  await api("/tasks", { method: "POST", body: { title: $("ttitle").value, details: $("tdetails").value, assigned_to: $("tagent").value, depends_on: $("tdep").value } });
+  $("ttitle").value = $("tdetails").value = ""; refresh();
+});
+submit("newmem", null, async () => { await api("/memories", { method: "POST", body: { content: $("mcontent").value } }); $("mcontent").value = ""; refresh(); });
+submit("newagent", "agenterr", async () => {
+  const j = await api("/agents", { method: "POST", body: { name: $("aname").value } });
+  $("aname").value = ""; $("agentsecret").hidden = false;
+  $("agentsecret").replaceChildren(`Connector URL for ${j.agent.name} (shown once). Add it as a custom connector in that agent's app:`, el("br"), j.mcp_url_with_token);
+  refresh();
+});
+$("signout").onclick = () => signOut();
+if (key) signIn(key);
+</script>
+</body>
+</html>
