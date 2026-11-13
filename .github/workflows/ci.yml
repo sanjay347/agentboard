@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: End-to-end check (two simulated agents over MCP)
+        run: |
+          DB_PATH="$RUNNER_TEMP/agentboard.db" npm start &
+          for i in $(seq 1 30); do curl -sf http://localhost:8787/healthz && break; sleep 1; done
+          npm run demo

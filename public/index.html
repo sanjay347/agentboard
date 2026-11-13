@@ -120,7 +120,7 @@ async function refresh() {
   $("cols").replaceChildren(...[["open", "Open"], ["in_progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]].map(([s, label]) => {
     const tasks = b.tasks.filter(t => t.status === s);
     return el("div", { className: "card" }, el("h2", { textContent: `${label} · ${tasks.length}` }), ...tasks.map(t => {
-      const who = t.claimed_by ? `${t.claimed_by} is on it` : t.assigned_to ? `for ${t.assigned_to}` : "anyone";
+      const who = t.status === "done" && t.claimed_by ? `done by ${t.claimed_by}` : t.claimed_by ? `${t.claimed_by} is on it` : t.assigned_to ? `for ${t.assigned_to}` : "anyone";
       const card = el("div", { className: "task" }, el("div", { textContent: t.title }),
         el("small", { textContent: `${who} · from ${t.created_by} · ${ago(t.updated_at)}` }));
       if (t.depends_on) card.append(el("small", { textContent: "after: " + (titles[t.depends_on] || t.depends_on) }));
