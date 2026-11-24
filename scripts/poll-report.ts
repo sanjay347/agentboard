@@ -44,40 +44,58 @@ const calls = store.toolCalls(ws);
 const when = (iso: string) => new Date(iso).toLocaleString();
 const mins = (a: Date, b: Date) => Math.round(Math.abs(+a - +b) / 60000);
 
-if (!calls.length) {
-  console.log(`No tool calls recorded for ${ws}.\n`);
-  console.log("Either no agent has contacted the board since logging was added,");
-  console.log("or the server was not reachable at the URL the connectors point at.");
-  console.log("Check the server is running and the connector URL is current.");
-  process.exit(0);
-}
-
 // ---- per agent ---------------------------------------------------------------
-const agents = [...new Set(calls.map((c) => c.agent))].sort();
-console.log(`\n${calls.length} tool calls on ${ws}, ${agents.length} agent(s)\n`);
-console.log("AGENT       CALLS  FIRST CONTACT         LAST CONTACT          LONGEST GAP  TOOLS USED");
-for (const a of agents) {
-  const mine = calls.filter((c) => c.agent === a);
-  let gap = 0;
-  for (let i = 1; i < mine.length; i++) {
-    gap = Math.max(gap, mins(new Date(mine[i].created_at), new Date(mine[i - 1].created_at)));
+// No calls at all is the expected state at the start of a window, and it is
+// also what a dead tunnel looks like, so the quiet-window section below still
+// runs: it is the part that can tell those two apart.
+if (!calls.length) {
+  console.log(`\nNo tool calls recorded for ${ws} yet.`);
+} else {
+  const agents = [...new Set(calls.map((c) => c.agent))].sort();
+  console.log(`\n${calls.length} tool calls on ${ws}, ${agents.length} agent(s)\n`);
+  console.log("AGENT       CALLS  FIRST CONTACT         LAST CONTACT          LONGEST GAP  TOOLS USED");
+  for (const a of agents) {
+    const mine = calls.filter((c) => c.agent === a);
+    let gap = 0;
+    for (let i = 1; i < mine.length; i++) {
+      gap = Math.max(gap, mins(new Date(mine[i].created_at), new Date(mine[i - 1].created_at)));
+    }
+    const tools = [...new Set(mine.map((c) => c.tool))].join(" ");
+    console.log(
+      `${a.padEnd(11)} ${String(mine.length).padStart(5)}  ${when(mine[0].created_at).padEnd(21)} ` +
+        `${when(mine[mine.length - 1].created_at).padEnd(21)} ${(gap ? gap + "m" : "-").padStart(11)}  ${tools}`,
+    );
   }
-  const tools = [...new Set(mine.map((c) => c.tool))].join(" ");
-  console.log(
-    `${a.padEnd(11)} ${String(mine.length).padStart(5)}  ${when(mine[0].created_at).padEnd(21)} ` +
-      `${when(mine[mine.length - 1].created_at).padEnd(21)} ${(gap ? gap + "m" : "-").padStart(11)}  ${tools}`,
-  );
 }
 
 // ---- the verdict -------------------------------------------------------------
 if (quietFrom) {
   const quiet = calls.filter((c) => new Date(c.created_at) >= quietFrom);
   console.log(`\n── Quiet window: nothing opened by you since ${when(quietFrom.toISOString())} ──\n`);
+  // A quick tunnel's hostname changes when Cloudflare reaps it, which kills the
+  // connectors silently. Silence after that is a broken link, not a finding.
+  let rotated: string[] = [];
+  try {
+    rotated = (await import("node:fs"))
+      .readFileSync(".tunnel-history", "utf8")
+      .trim().split("\n").filter(Boolean)
+      .filter((line) => new Date(line.slice(0, 20)) > quietFrom);
+  } catch { /* no tunnel history kept */ }
+
   if (!quiet.length) {
     const since = mins(new Date(), quietFrom);
-    console.log(`  NO CONTACT in ${since} minutes.`);
-    console.log("  On this evidence the agents do not poll the board unprompted.");
-    console.log("  Leave it longer before concluding: some agents only check on a daily cycle.");
+    if (rotated.length) {
+      console.log(`  NO CONTACT in ${since} minutes — but the public URL changed ${rotated.length} time(s) since:`);
+      for (const r of rotated) console.log(`    ${r}`);
+      console.log("\n  THIS IS NOT A RESULT. The connectors pointed at a dead hostname, so the");
+      console.log("  agents could not reach the board even if they tried. Repoint them from");
+      console.log("  CONNECT.md, run `npm run quiet:start`, and begin the window again.");
+    } else {
+      console.log(`  NO CONTACT in ${since} minutes.`);
+      console.log("  On this evidence the agents do not poll the board unprompted.");
+      console.log("  Leave it longer before concluding: some agents only check on a daily cycle.");
+      console.log("  Confirm the public URL answers /healthz before trusting this.");
+    }
   } else {
     console.log(`  ${quiet.length} call(s) arrived with you not touching the agents:\n`);
     for (const c of quiet) {
@@ -93,6 +111,7 @@ if (quietFrom) {
 }
 
 // ---- timeline ----------------------------------------------------------------
+if (!calls.length) process.exit(0);
 console.log("\n── Full timeline ──\n");
 let day = "";
 for (const c of calls) {
