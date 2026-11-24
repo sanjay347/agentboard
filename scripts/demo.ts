@@ -10,7 +10,12 @@ const BASE = process.env.BASE_URL ?? "http://localhost:8787";
 async function rest(path: string, body?: unknown, key?: string) {
   const r = await fetch(BASE + path, {
     method: body ? "POST" : "GET",
-    headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+    headers: {
+      "content-type": "application/json",
+      ...(key ? { authorization: `Bearer ${key}` } : {}),
+      // A deployed server only lets the admin create boards.
+      ...(process.env.ADMIN_KEY ? { "x-admin-key": process.env.ADMIN_KEY } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const raw = await r.text(); // 204 responses have no body
@@ -40,12 +45,24 @@ const duet = await connect("duet", duetReg.token, true); // token in URL
 step("workspace created, muse and duet connected over MCP");
 
 const tools = (await muse.client.listTools()).tools.map((t) => t.name);
-assert.equal(tools.length, 11);
+assert.equal(tools.length, 12);
 step(`tools exposed: ${tools.join(", ")}`);
+
+// The scheduled check agents run: nearly free when there's nothing to do.
+const inboxText = async (agent: { client: Client }) =>
+  ((await agent.client.callTool({ name: "check_inbox", arguments: {} })) as { content: { text: string }[] }).content[0].text;
+assert.equal(await inboxText(muse), "Nothing waiting.");
+const v0 = (await rest("/api/version", undefined, ws.owner_key)).json.version;
+step(`check_inbox answers an empty board in ${"Nothing waiting.".length} characters`);
 
 // Owner gives Muse a task, and Duet a follow-up that depends on it.
 const t1 = (await rest("/api/tasks", { title: "Find 3 flights to Tokyo in March", assigned_to: "muse" }, ws.owner_key)).json;
 const t2 = (await rest("/api/tasks", { title: "Draft an itinerary around the best flight", assigned_to: "duet", depends_on: t1.id }, ws.owner_key)).json;
+
+assert.match(await inboxText(muse), new RegExp(`1 waiting: ${t1.id}`));
+assert.equal(await inboxText(duet), "Nothing waiting."); // its task waits on muse's, so it isn't ready yet
+assert.ok((await rest("/api/version", undefined, ws.owner_key)).json.version > v0);
+step("check_inbox lists only work that's ready, and the board's version moved so the app knows to refresh");
 
 // Duet looks first: its task is not ready, and it cannot take Muse's task.
 assert.equal((await duet.call("get_task", { id: t2.id })).data.ready, false);

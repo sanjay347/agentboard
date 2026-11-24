@@ -10,8 +10,9 @@
 //   node scripts/poll-report.ts ws_6ce03575ba --quiet-from 2026-11-23T20:00
 //
 import { Store } from "../src/db.ts";
+import { nodeSql } from "../src/sql-node.ts";
 
-const store = new Store(process.env.DB_PATH ?? "data/agentboard.db");
+const store = await Store.open(nodeSql(process.env.DB_PATH ?? "data/agentboard.db"));
 const args = process.argv.slice(2);
 const ws = args.find((a) => a.startsWith("ws_"));
 const flag = (name: string) => {
@@ -33,14 +34,14 @@ if (quietFromRaw && Number.isNaN(quietFrom!.getTime())) {
 
 if (!ws) {
   console.log("Boards on this server:\n");
-  for (const w of store.listWorkspaces()) {
+  for (const w of await store.listWorkspaces()) {
     console.log(`  ${w.id}  ${w.name.padEnd(24)} agents: ${w.agents || "(none)"}`);
   }
   console.log("\nRun again with a board id to see its tool calls.");
   process.exit(0);
 }
 
-const calls = store.toolCalls(ws);
+const calls = await store.toolCalls(ws);
 const when = (iso: string) => new Date(iso).toLocaleString();
 const mins = (a: Date, b: Date) => Math.round(Math.abs(+a - +b) / 60000);
 

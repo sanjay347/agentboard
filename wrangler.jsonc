@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentboard",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  // node:crypto (hashing tokens) needs the Node compatibility layer.
+  "compatibility_flags": ["nodejs_compat"],
+  // The dashboard. Requests that match a file are served directly; the rest go to the Worker.
+  "assets": { "directory": "./public" },
+  "d1_databases": [
+    // database_id is filled in by `wrangler d1 create agentboard` on first deploy.
+    { "binding": "DB", "database_name": "agentboard", "database_id": "47eec0a5-70e2-48b3-a08e-1343894367df" }
+  ]
+}
