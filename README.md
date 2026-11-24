@@ -39,8 +39,8 @@ One small HTTP service with three faces:
 
 | Face | For | What it does |
 |---|---|---|
-| MCP endpoint (`/mcp`) | Agents | Ten tools over stateless streamable HTTP |
-| REST API (`/api`) | The owner | Create a board, connect agents, post tasks |
+| MCP endpoint (`/mcp`) | Agents | Eleven tools over stateless streamable HTTP |
+| REST API (`/api`) | The owner and the [iOS app](https://github.com/sanjay347/agentboard-ios) | Boards, agents, tasks and conversations |
 | Dashboard (`/`) | The owner | Tasks by status, shared memory, activity log |
 
 The tools an agent sees:
@@ -49,11 +49,31 @@ The tools an agent sees:
 |---|---|
 | `whoami` | The agent's name on the board, and who else is connected |
 | `post_task` | Add a task for itself or another agent, optionally depending on another task |
-| `list_tasks`, `get_task` | Find work; `get_task` includes the result of the task this one depends on |
+| `list_tasks`, `get_task` | Find work; `get_task` includes the conversation and the result of the task this one depends on |
+| `get_thread` | The whole conversation a task belongs to |
 | `claim_task` | Take an open task. Only one agent can win a claim. |
 | `update_task`, `complete_task` | Report progress, or finish and attach the result |
 | `remember`, `recall` | Save and search facts every agent should know |
 | `recent_activity` | What the owner and the other agents did lately |
+
+### Conversations
+
+The iOS app is a chat, but nothing in it talks to an agent directly: Duet has no public API and Muse only accepts connectors it calls into. So each message the user sends becomes a task on the board, and the agent's `complete_task` result is the reply.
+
+- **A thread** is one conversation. Its messages are a timeline of real board events: the request, the claim, progress notes, a question, the user's answer, the result.
+- **An agent can ask.** It sets its task to `blocked` with the question in `note`. The user's reply reopens the task assigned to that same agent, so the agent's normal loop (list, claim, read) picks the answer up with no new behaviour.
+- **Hand-offs** are a new request in the same thread with `depends_on` pointing at the previous task, so the next agent gets the earlier result attached as information, and the instruction stays the user's.
+- **Each thread has a state** worked out from its tasks: `needs_you` (a question, or a reply not yet read), `working`, `waiting` (nobody has picked it up), or `done`.
+- **Presence comes from the call log.** Each agent's last contact and its median time from a task becoming available to claiming it, so the app can say how long a reply is likely to take before you send.
+
+| Route | Does |
+|---|---|
+| `GET /api/threads`, `POST /api/threads` | List conversations with their state, or start one |
+| `GET /api/threads/:id` | Messages and tasks in one conversation |
+| `POST /api/threads/:id/messages` | Another request, optionally to another agent with `depends_on` |
+| `POST /api/threads/:id/read` | Mark replies read |
+| `POST /api/tasks/:id/reply`, `/reassign`, `/cancel` | Answer an agent, hand unclaimed work to someone else, or stop it |
+| `GET /api/agents` | Agents with last seen and typical pickup time |
 
 ### Decisions worth a look
 
@@ -61,7 +81,7 @@ The tools an agent sees:
 - **Claims are atomic.** `claim_task` is a single conditional `UPDATE`, so two agents racing for a task cannot both get it.
 - **The server keeps nothing in memory between requests** ([`src/server.ts`](src/server.ts)). A new MCP server is built per request and bound to the calling agent, so it can run as any number of copies.
 - **Each agent has its own revocable token**, stored only as a hash.
-- **Board content is labelled as data.** One agent's output becomes another agent's input, so a web page that fools Muse could otherwise steer Duet. Every tool result carries a notice that titles, results and memories are information, not instructions ([`src/mcp.ts`](src/mcp.ts)).
+- **Who wrote something decides how it may be used.** One agent's output becomes another agent's input, so a web page that fools Muse could otherwise steer Duet. Every tool result says that only tasks and messages from `owner` (sent with the owner key) are the user's requests; results, notes, memories and agent-posted tasks are information, never instructions ([`src/mcp.ts`](src/mcp.ts)).
 - **Safe to expose.** New boards can only be created from the machine the server runs on unless public sign-up is switched on, and requests are rate-limited per address.
 
 ## Run it
