@@ -13,7 +13,8 @@ async function rest(path: string, body?: unknown, key?: string) {
     headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
-  return { status: r.status, json: (await r.json()) as any };
+  const raw = await r.text(); // 204 responses have no body
+  return { status: r.status, json: (raw ? JSON.parse(raw) : null) as any };
 }
 
 async function connect(name: string, token: string, inPath = false) {
@@ -39,7 +40,7 @@ const duet = await connect("duet", duetReg.token, true); // token in URL
 step("workspace created, muse and duet connected over MCP");
 
 const tools = (await muse.client.listTools()).tools.map((t) => t.name);
-assert.equal(tools.length, 10);
+assert.equal(tools.length, 11);
 step(`tools exposed: ${tools.join(", ")}`);
 
 // Owner gives Muse a task, and Duet a follow-up that depends on it.
@@ -75,6 +76,65 @@ const activity = (await duet.call("recent_activity", { limit: 50 })).data;
 assert.ok(activity.some((e: any) => e.actor === "muse" && e.action === "task_done"));
 step(`activity log has ${activity.length} events from owner, muse and duet`);
 
+// ---- Conversations from the app ---------------------------------------------
+// A chat message is a task; the agent's result is the reply.
+const started = (await rest("/api/threads", { body: "Find three ramen places open late near downtown", to: "muse" }, ws.owner_key)).json;
+const th = started.thread.id;
+const q1 = started.task.id;
+assert.equal(started.thread.state, "waiting");
+const inbox = (await muse.call("list_tasks", { mine: true, status: "open" })).data;
+assert.equal(inbox.find((t: any) => t.id === q1)?.thread_id, th);
+step("a chat message from the app arrives as an open task in muse's list");
+
+await muse.call("claim_task", { id: q1 });
+assert.equal((await rest(`/api/threads/${th}`, undefined, ws.owner_key)).json.state, "working");
+await muse.call("update_task", { id: q1, status: "blocked", note: "Which neighbourhood counts as downtown for you?" });
+let thread = (await rest(`/api/threads/${th}`, undefined, ws.owner_key)).json;
+assert.equal(thread.state, "needs_you");
+assert.equal(thread.messages.at(-1).kind, "question");
+step("muse asks a question and the conversation moves to needs you");
+
+const replied = (await rest(`/api/tasks/${q1}/reply`, { body: "Mission or SoMa" }, ws.owner_key)).json;
+assert.equal(replied.status, "open");
+assert.equal(replied.assigned_to, "muse");
+assert.match((await duet.call("claim_task", { id: q1 })).error!, /assigned to muse/);
+await muse.call("claim_task", { id: q1 });
+const context = (await muse.call("get_task", { id: q1 })).data;
+assert.deepEqual(context.conversation.map((m: any) => m.kind), ["request", "claimed", "question", "reply", "claimed"]);
+assert.equal(context.conversation[3].text, "Mission or SoMa");
+await muse.call("complete_task", { id: q1, result: "1. Ramen Shop (Mission, till 1am)\n2. Iza (SoMa)\n3. Mensho (till midnight)" });
+thread = (await rest(`/api/threads/${th}`, undefined, ws.owner_key)).json;
+assert.equal(thread.state, "needs_you");
+assert.equal(thread.unread, true);
+assert.equal((await rest(`/api/threads/${th}/read`, {}, ws.owner_key)).status, 204);
+assert.equal((await rest(`/api/threads/${th}`, undefined, ws.owner_key)).json.state, "done");
+step("the answer goes back to muse as open work, muse reads it in the conversation and replies");
+
+// A hand-off in the same conversation: Duet gets Muse's result attached.
+const q2 = (await rest(`/api/threads/${th}/messages`, { body: "Book a table at the first one for Friday 8pm", to: "duet", depends_on: q1 }, ws.owner_key)).json;
+const handoff = (await duet.call("get_task", { id: q2.id })).data;
+assert.equal(handoff.ready, true);
+assert.match(handoff.dependency.result, /Ramen Shop/);
+assert.equal(handoff.thread_id, th);
+assert.equal(handoff.created_by, "owner");
+step("a hand-off to duet carries muse's result, and duet can see the request came from the user");
+
+// Owner actions on work nobody has picked up yet.
+assert.equal((await rest(`/api/tasks/${q2.id}/reassign`, { to: "muse" }, ws.owner_key)).json.assigned_to, "muse");
+assert.equal((await rest(`/api/tasks/${q2.id}/reassign`, { to: "nobody" }, ws.owner_key)).status, 400);
+assert.equal((await rest(`/api/tasks/${q2.id}/cancel`, {}, ws.owner_key)).json.status, "cancelled");
+assert.match((await muse.call("claim_task", { id: q2.id })).error!, /cancelled/);
+assert.equal((await rest(`/api/tasks/${q1}/reply`, { body: "thanks" }, ws.owner_key)).status, 400);
+step("unclaimed work can be reassigned or cancelled, and cancelled work can't be claimed");
+
+const musePresence = (await rest("/api/agents", undefined, ws.owner_key)).json.find((a: any) => a.name === "muse");
+assert.ok(musePresence.last_seen);
+assert.equal(typeof musePresence.typical_pickup_seconds, "number");
+const threads = (await rest("/api/threads", undefined, ws.owner_key)).json;
+assert.equal(threads[0].id, th);
+assert.equal(threads[0].state, "done");
+step(`presence from the call log: muse last seen ${musePresence.last_seen}, picks up in ~${musePresence.typical_pickup_seconds}s`);
+
 // Isolation: a different workspace sees none of this.
 const other = (await rest("/api/workspaces", { name: "Someone else" })).json;
 const spyReg = (await rest("/api/agents", { name: "spy" }, other.owner_key)).json;
@@ -83,7 +143,9 @@ assert.deepEqual((await spy.call("list_tasks")).data, []);
 assert.match((await spy.call("get_task", { id: t1.id })).error!, /not found/);
 assert.deepEqual((await spy.call("recall", { query: "flight" })).data, []);
 assert.equal((await rest("/api/board", undefined, other.owner_key)).json.tasks.length, 0);
-step("a second workspace cannot see the first one's tasks or memories");
+assert.match((await spy.call("get_thread", { id: th })).error!, /not found/);
+assert.equal((await rest(`/api/threads/${th}`, undefined, other.owner_key)).status, 404);
+step("a second workspace cannot see the first one's tasks, memories or conversations");
 
 // Bad credentials are rejected.
 assert.equal((await rest("/api/board", undefined, "owner_wrong")).status, 401);
