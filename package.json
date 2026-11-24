@@ -5,11 +5,13 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node src/server.ts",
+    "start": "node src/node.ts",
     "demo": "node scripts/demo.ts",
     "typecheck": "tsc --noEmit",
     "poll-report": "node scripts/poll-report.ts",
-    "quiet:start": "date -u +\"%Y-%m-%dT%H:%M:%SZ\" > .quiet-from && echo \"quiet window restarted at $(cat .quiet-from)\""
+    "quiet:start": "date -u +\"%Y-%m-%dT%H:%M:%SZ\" > .quiet-from && echo \"quiet window restarted at $(cat .quiet-from)\"",
+    "dev:worker": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
   "keywords": [],
   "author": "",
@@ -17,13 +19,15 @@
   "type": "module",
   "private": true,
   "dependencies": {
+    "@hono/node-server": "^1.19.19",
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "express": "^5.3.0",
+    "hono": "^4.13.21",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/express": "^5.0.6",
+    "@cloudflare/workers-types": "^5.20261124.1",
     "@types/node": "^26.6.6",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "wrangler": "^4.168.0"
   }
 }

@@ -6,3 +6,5 @@ CONNECT.md*
 .quiet-from
 .tunnel-url
 .tunnel-history
+.dev.vars
+.wrangler
