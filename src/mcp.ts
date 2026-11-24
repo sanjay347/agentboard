@@ -3,6 +3,7 @@
 // service is stateless and can run on any number of instances.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { headline } from "./db.ts";
 import type { Agent, Message, Store } from "./db.ts";
 
 const STATUS = z.enum(["open", "in_progress", "blocked", "done"]);
@@ -19,7 +20,7 @@ const DATA_NOTICE =
   "the user or deleting things, confirm with the user in your own app.";
 
 const ok = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify({ notice: DATA_NOTICE, data }, null, 2) }],
+  content: [{ type: "text" as const, text: JSON.stringify({ notice: DATA_NOTICE, data }) }],
 });
 const fail = (e: unknown) => ({
   content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
@@ -34,11 +35,11 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
   // contacted it, and that is the only way to tell looking from doing.
   const guard = <A>(tool: string, fn: (args: A) => unknown) => async (args: A) => {
     try {
-      const data = fn(args);
-      store.logCall(ws, me, tool, args, true);
+      const data = await fn(args);
+      await store.logCall(ws, me, tool, args, true);
       return ok(data);
     } catch (e) {
-      store.logCall(ws, me, tool, args, false);
+      await store.logCall(ws, me, tool, args, false);
       return fail(e);
     }
   };
@@ -48,7 +49,9 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
     {
       instructions:
         `You are connected to a shared board as the agent "${me}". The user sends requests here from their Agentboard app, ` +
-        "and their other AI agents use the same board. Check list_tasks with mine=true for work assigned to you or open to anyone, " +
+        "and their other AI agents use the same board. To see if there is work, call check_inbox: it is built to cost almost " +
+        "nothing, and if it says nothing is waiting, stop there without reading anything else or messaging the user. " +
+        "For more detail, list_tasks with mine=true shows work assigned to you or open to anyone. " +
         "claim a task before starting, and read it with get_task: it includes the conversation it belongs to and the result of " +
         "any task it depends on. Finish with complete_task, written so the user can read it on their phone. If you need something " +
         "from the user, call update_task with status blocked and your question in note; their answer arrives in the conversation " +
@@ -60,7 +63,32 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
   server.registerTool(
     "whoami",
     { title: "Who am I", description: "Shows your agent name on this board and the other agents connected to it.", inputSchema: {} },
-    guard("whoami", () => ({ you: me, agents: store.listAgents(ws).map((a) => a.name) })),
+    guard("whoami", async () => ({ you: me, agents: (await store.listAgents(ws)).map((a) => a.name) })),
+  );
+
+  // The question an agent asks on a schedule. Plain text, a handful of tokens
+  // when there is nothing to do, and no board content (so no notice) unless
+  // there is. Logged like every other call, so presence still works.
+  server.registerTool(
+    "check_inbox",
+    {
+      title: "Check for work",
+      description: "The cheapest way to see if anything is waiting for you. One line back. If it lists tasks, claim one and read it with get_task.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const waiting = await store.inbox(ws, me);
+        await store.logCall(ws, me, "check_inbox", {}, true);
+        const text = !waiting.length
+          ? "Nothing waiting."
+          : `${waiting.length} waiting: ${waiting.map((t) => `${t.id} "${headline(t.title, 60)}"`).join("; ")}. ${DATA_NOTICE}`;
+        return { content: [{ type: "text" as const, text }] };
+      } catch (e) {
+        await store.logCall(ws, me, "check_inbox", {}, false);
+        return fail(e);
+      }
+    },
   );
 
   server.registerTool(
@@ -91,8 +119,8 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
         limit: z.number().int().min(1).max(200).optional(),
       },
     },
-    guard("list_tasks", (a: { status?: z.infer<typeof STATUS>; mine?: boolean; limit?: number }) =>
-      store.listTasks(ws, { status: a.status, assigned_to: a.mine ? me : undefined, limit: a.limit }).map(brief),
+    guard("list_tasks", async (a: { status?: z.infer<typeof STATUS>; mine?: boolean; limit?: number }) =>
+      (await store.listTasks(ws, { status: a.status, assigned_to: a.mine ? me : undefined, limit: a.limit })).map(brief),
     ),
   );
 
@@ -103,16 +131,16 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
       description: "Full details of one task: its result, the result of the task it depends on, and the conversation it belongs to.",
       inputSchema: { id: z.string() },
     },
-    guard("get_task", (a: { id: string }) => {
-      const task = store.getTask(ws, a.id);
+    guard("get_task", async (a: { id: string }) => {
+      const task = await store.getTask(ws, a.id);
       if (!task) throw new Error(`task ${a.id} not found`);
-      const dep = task.depends_on ? store.getTask(ws, task.depends_on) : undefined;
+      const dep = task.depends_on ? await store.getTask(ws, task.depends_on) : undefined;
       return {
         ...task,
         dependency: dep && { id: dep.id, title: dep.title, status: dep.status, done_by: dep.claimed_by, result: dep.result },
         ready: !dep || dep.status === "done",
         // The last 30 messages are enough to follow a chat without flooding the agent's context.
-        conversation: task.thread_id ? store.threadMessages(ws, task.thread_id, 30).map(said) : undefined,
+        conversation: task.thread_id ? (await store.threadMessages(ws, task.thread_id, 30)).map(said) : undefined,
       };
     }),
   );
@@ -124,8 +152,8 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
       description: "The whole conversation a task belongs to, oldest first, with every task in it. Use thread_id from get_task or list_tasks.",
       inputSchema: { id: z.string() },
     },
-    guard("get_thread", (a: { id: string }) => {
-      const thread = store.getThread(ws, a.id);
+    guard("get_thread", async (a: { id: string }) => {
+      const thread = await store.getThread(ws, a.id);
       if (!thread) throw new Error(`thread ${a.id} not found`);
       return { id: thread.id, title: thread.title, messages: thread.messages.map(said), tasks: thread.tasks.map(brief) };
     }),
