@@ -441,7 +441,7 @@ export class Store {
    * a request is waiting to be picked up, or it is all finished.
    */
   private summarise(ws: string, t: Thread): ThreadSummary {
-    const tasks = this.db.prepare("SELECT status, assigned_to, claimed_by FROM tasks WHERE workspace_id = ? AND thread_id = ?").all(ws, t.id) as {
+    const tasks = this.db.prepare("SELECT status, assigned_to, claimed_by FROM tasks WHERE workspace_id = ? AND thread_id = ? ORDER BY created_at").all(ws, t.id) as {
       status: TaskStatus;
       assigned_to: string | null;
       claimed_by: string | null;
@@ -455,6 +455,7 @@ export class Store {
     const last = this.db
       .prepare("SELECT author, kind, body, created_at FROM messages WHERE workspace_id = ? AND thread_id = ? AND kind != 'claimed' ORDER BY id DESC LIMIT 1")
       .get(ws, t.id) as ThreadSummary["last_message"] | undefined;
+    // Oldest first, so the last entry is the agent the conversation is with now.
     const agents = [...new Set(tasks.flatMap((x) => [x.claimed_by, x.assigned_to]).filter((a): a is string => !!a))];
     return { ...t, state, unread, agents, last_message: last ?? null };
   }
