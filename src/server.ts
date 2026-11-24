@@ -94,7 +94,7 @@ api.get("/board", (req, res) => {
   const ws = wsOf(req);
   res.json({
     workspace: ws,
-    agents: store.listAgents(ws.id),
+    agents: store.agentPresence(ws.id),
     tasks: store.listTasks(ws.id, { limit: 100 }),
     memories: store.recall(ws.id, String(req.query.q ?? ""), 50),
     events: store.recentEvents(ws.id, 50),
@@ -131,6 +131,85 @@ api.post("/tasks", (req, res) => {
     res.status(201).json(task);
   } catch (e) {
     res.status(400).json({ error: (e as Error).message });
+  }
+});
+
+// ---- Conversations ---------------------------------------------------------
+// The app's chat. Each message the user sends is a task; the agent's result is
+// the reply. Nothing here talks to an agent directly: agents find the work the
+// same way they always do, through list_tasks on their connector.
+
+/** Trimmed text from the body, or a 400 if it's missing. */
+function text(res: Response, value: unknown, field: string, max: number): string | undefined {
+  const v = String(value ?? "").trim().slice(0, max);
+  if (!v) res.status(400).json({ error: `${field} is required` });
+  return v || undefined;
+}
+const optionalName = (value: unknown) => (value ? String(value).trim().toLowerCase() : undefined);
+/** Store methods throw plain Errors with a reason the user can read; 404 when nothing matched. */
+function fail(res: Response, e: unknown) {
+  const message = (e as Error).message;
+  res.status(/not found/.test(message) ? 404 : 400).json({ error: message });
+}
+
+api.get("/agents", (req, res) => void res.json(store.agentPresence(wsOf(req).id)));
+
+api.get("/threads", (req, res) => void res.json(store.listThreads(wsOf(req).id)));
+
+api.post("/threads", (req, res) => {
+  const body = text(res, req.body?.body, "body", 8000);
+  if (!body) return;
+  try {
+    res.status(201).json(store.startThread(wsOf(req).id, body, optionalName(req.body.to)));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+api.get("/threads/:id", (req, res) => {
+  const thread = store.getThread(wsOf(req).id, req.params.id);
+  if (!thread) return void res.status(404).json({ error: "thread not found" });
+  res.json(thread);
+});
+
+api.post("/threads/:id/messages", (req, res) => {
+  const body = text(res, req.body?.body, "body", 8000);
+  if (!body) return;
+  try {
+    const dependsOn = req.body.depends_on ? String(req.body.depends_on) : undefined;
+    res.status(201).json(store.addToThread(wsOf(req).id, req.params.id, body, optionalName(req.body.to), dependsOn));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+api.post("/threads/:id/read", (req, res) => {
+  res.status(store.markRead(wsOf(req).id, req.params.id) ? 204 : 404).end();
+});
+
+api.post("/tasks/:id/reply", (req, res) => {
+  const body = text(res, req.body?.body, "body", 8000);
+  if (!body) return;
+  try {
+    res.json(store.replyToTask(wsOf(req).id, req.params.id, body));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+api.post("/tasks/:id/reassign", (req, res) => {
+  try {
+    res.json(store.reassignTask(wsOf(req).id, req.params.id, optionalName(req.body?.to) ?? null));
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+api.post("/tasks/:id/cancel", (req, res) => {
+  try {
+    res.json(store.cancelTask(wsOf(req).id, req.params.id));
+  } catch (e) {
+    fail(res, e);
   }
 });
 
