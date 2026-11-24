@@ -7,7 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/server.ts",
     "demo": "node scripts/demo.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "poll-report": "node scripts/poll-report.ts",
+    "quiet:start": "date -u +\"%Y-%m-%dT%H:%M:%SZ\" > .quiet-from && echo \"quiet window restarted at $(cat .quiet-from)\""
   },
   "keywords": [],
   "author": "",

@@ -1,3 +1,8 @@
 node_modules
 data
-CONNECT.md
+# Connection details are passwords: the agent URLs embed live tokens.
+CONNECT.md*
+# Local marker for when the background-pickup test's quiet window started.
+.quiet-from
+.tunnel-url
+.tunnel-history
