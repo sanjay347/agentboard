@@ -21,17 +21,24 @@ const fail = (e: unknown) => ({
   content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
   isError: true,
 });
-const guard = <A>(fn: (args: A) => unknown) => async (args: A) => {
-  try {
-    return ok(fn(args));
-  } catch (e) {
-    return fail(e);
-  }
-};
-
 export function buildMcpServer(store: Store, agent: Agent): McpServer {
   const ws = agent.workspace_id;
   const me = agent.name;
+
+  // Records every call before returning, successes and failures alike. The
+  // reads matter most: an agent that checks the board and claims nothing still
+  // contacted it, and that is the only way to tell looking from doing.
+  const guard = <A>(tool: string, fn: (args: A) => unknown) => async (args: A) => {
+    try {
+      const data = fn(args);
+      store.logCall(ws, me, tool, args, true);
+      return ok(data);
+    } catch (e) {
+      store.logCall(ws, me, tool, args, false);
+      return fail(e);
+    }
+  };
+
   const server = new McpServer(
     { name: "agentboard", version: "0.1.0" },
     {
@@ -46,7 +53,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
   server.registerTool(
     "whoami",
     { title: "Who am I", description: "Shows your agent name on this board and the other agents connected to it.", inputSchema: {} },
-    guard(() => ({ you: me, agents: store.listAgents(ws).map((a) => a.name) })),
+    guard("whoami", () => ({ you: me, agents: store.listAgents(ws).map((a) => a.name) })),
   );
 
   server.registerTool(
@@ -63,7 +70,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
         depends_on: z.string().optional().describe("Id of a task whose result this task needs"),
       },
     },
-    guard((a: { title: string; details?: string; assigned_to?: string; depends_on?: string }) => store.postTask(ws, me, a)),
+    guard("post_task", (a: { title: string; details?: string; assigned_to?: string; depends_on?: string }) => store.postTask(ws, me, a)),
   );
 
   server.registerTool(
@@ -77,7 +84,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
         limit: z.number().int().min(1).max(200).optional(),
       },
     },
-    guard((a: { status?: z.infer<typeof STATUS>; mine?: boolean; limit?: number }) =>
+    guard("list_tasks", (a: { status?: z.infer<typeof STATUS>; mine?: boolean; limit?: number }) =>
       store.listTasks(ws, { status: a.status, assigned_to: a.mine ? me : undefined, limit: a.limit }).map(brief),
     ),
   );
@@ -89,7 +96,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
       description: "Full details of one task, including its result and the status and result of the task it depends on.",
       inputSchema: { id: z.string() },
     },
-    guard((a: { id: string }) => {
+    guard("get_task", (a: { id: string }) => {
       const task = store.getTask(ws, a.id);
       if (!task) throw new Error(`task ${a.id} not found`);
       const dep = task.depends_on ? store.getTask(ws, task.depends_on) : undefined;
@@ -108,7 +115,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
       description: "Mark an open task as yours and in progress. Fails if another agent already claimed it. Claim before you start work.",
       inputSchema: { id: z.string() },
     },
-    guard((a: { id: string }) => store.claimTask(ws, me, a.id)),
+    guard("claim_task", (a: { id: string }) => store.claimTask(ws, me, a.id)),
   );
 
   server.registerTool(
@@ -118,7 +125,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
       description: "Post a progress note or change status (for example to blocked, with the reason in note).",
       inputSchema: { id: z.string(), status: STATUS.optional(), note: z.string().max(2000).optional() },
     },
-    guard((a: { id: string; status?: z.infer<typeof STATUS>; note?: string }) => store.updateTask(ws, me, a.id, a)),
+    guard("update_task", (a: { id: string; status?: z.infer<typeof STATUS>; note?: string }) => store.updateTask(ws, me, a.id, a)),
   );
 
   server.registerTool(
@@ -128,7 +135,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
       description: "Mark a task done and attach its result. Write the result so another agent can use it without asking you anything.",
       inputSchema: { id: z.string(), result: z.string().min(1).max(50000) },
     },
-    guard((a: { id: string; result: string }) => store.updateTask(ws, me, a.id, { status: "done", result: a.result })),
+    guard("complete_task", (a: { id: string; result: string }) => store.updateTask(ws, me, a.id, { status: "done", result: a.result })),
   );
 
   server.registerTool(
@@ -140,7 +147,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
         "Not for task progress: use update_task for that. Never store passwords, card numbers or other secrets.",
       inputSchema: { content: z.string().min(1).max(4000), tags: z.array(z.string().max(40)).max(10).optional() },
     },
-    guard((a: { content: string; tags?: string[] }) => store.remember(ws, me, a.content, a.tags)),
+    guard("remember", (a: { content: string; tags?: string[] }) => store.remember(ws, me, a.content, a.tags)),
   );
 
   server.registerTool(
@@ -150,7 +157,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
       description: "Search the memories saved by any agent on this board. An empty query returns the most recent ones.",
       inputSchema: { query: z.string().max(200).optional(), limit: z.number().int().min(1).max(50).optional() },
     },
-    guard((a: { query?: string; limit?: number }) => store.recall(ws, a.query ?? "", a.limit)),
+    guard("recall", (a: { query?: string; limit?: number }) => store.recall(ws, a.query ?? "", a.limit)),
   );
 
   server.registerTool(
@@ -160,7 +167,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
       description: "What the user and the other agents have done on the board lately, newest first.",
       inputSchema: { limit: z.number().int().min(1).max(200).optional() },
     },
-    guard((a: { limit?: number }) => store.recentEvents(ws, a.limit)),
+    guard("recent_activity", (a: { limit?: number }) => store.recentEvents(ws, a.limit)),
   );
 
   return server;

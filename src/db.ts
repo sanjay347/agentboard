@@ -66,6 +66,15 @@ export class Store {
         actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS events_ws ON events (workspace_id, id);
+      -- Every MCP tool call, reads included. The events table above records only
+      -- changes, so an agent that checks the board and claims nothing leaves no
+      -- trace there. Answering "did this agent look on its own?" needs the reads.
+      CREATE TABLE IF NOT EXISTS tool_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+        agent TEXT NOT NULL, tool TEXT NOT NULL, args TEXT NOT NULL DEFAULT '',
+        ok INTEGER NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS tool_calls_ws ON tool_calls (workspace_id, id);
     `);
   }
 
@@ -222,6 +231,44 @@ export class Store {
       .prepare("SELECT id, actor, action, subject, summary, created_at FROM events WHERE workspace_id = ? ORDER BY id DESC LIMIT ?")
       .all(ws, Math.min(limit, 200)) as unknown as Event[];
   }
+
+  // ---- tool call log ------------------------------------------------------
+  // Separate from events on purpose: this is instrumentation, not the activity
+  // feed a person reads. It answers when an agent contacted the board at all.
+
+  logCall(ws: string, agent: string, tool: string, args: unknown, ok: boolean): void {
+    let summary = "";
+    try {
+      summary = typeof args === "object" && args ? JSON.stringify(args).slice(0, 300) : "";
+    } catch {
+      summary = "<unserialisable>";
+    }
+    this.db
+      .prepare("INSERT INTO tool_calls (workspace_id, agent, tool, args, ok, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(ws, agent, tool, summary, ok ? 1 : 0, now());
+  }
+
+  toolCalls(ws: string, since?: string): ToolCall[] {
+    const rows = since
+      ? this.db
+          .prepare("SELECT id, agent, tool, args, ok, created_at FROM tool_calls WHERE workspace_id = ? AND created_at >= ? ORDER BY id")
+          .all(ws, since)
+      : this.db.prepare("SELECT id, agent, tool, args, ok, created_at FROM tool_calls WHERE workspace_id = ? ORDER BY id").all(ws);
+    return rows as unknown as ToolCall[];
+  }
+
+  /** Every workspace that has at least one agent, newest first. */
+  listWorkspaces(): { id: string; name: string; agents: string; created_at: string }[] {
+    return this.db
+      .prepare(
+        `SELECT w.id, w.name, w.created_at, COALESCE(GROUP_CONCAT(a.name, ', '), '') AS agents
+         FROM workspaces w LEFT JOIN agents a ON a.workspace_id = w.id
+         GROUP BY w.id ORDER BY w.created_at DESC`,
+      )
+      .all() as never;
+  }
 }
+
+export interface ToolCall { id: number; agent: string; tool: string; args: string; ok: number; created_at: string }
 
 const TASK_COLS = "id, title, details, status, created_by, assigned_to, claimed_by, depends_on, result, note, created_at, updated_at";
