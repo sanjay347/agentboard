@@ -3,6 +3,7 @@
 // development, CI) and on Cloudflare Workers (production). It keeps nothing in
 // memory between requests except a best-effort rate limiter.
 import { Hono } from "hono";
+import { logger } from "hono/logger";
 import type { Context, Next } from "hono";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Store, Workspace } from "./db.ts";
@@ -15,12 +16,15 @@ export interface Runtime {
   publicUrl(c: Context): string | undefined;
   /** Who may create a board: a request from this machine, the admin key, or anyone if public sign-up is on. */
   mayCreateBoard(c: Context): boolean;
+  /** Optional request log, one line per request. */
+  log?: (line: string) => void;
 }
 
 type Vars = { workspace: Workspace; store: Store };
 
 export function createApp(rt: Runtime) {
   const app = new Hono<{ Variables: Vars }>();
+  if (rt.log) app.use("*", logger(rt.log)); // first, so it sees every route
 
   // Fixed-window limit per client address. In memory, so per instance (per
   // isolate on Workers): a brake on runaway clients, not a security boundary.
