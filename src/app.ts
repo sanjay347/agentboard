@@ -3,7 +3,6 @@
 // development, CI) and on Cloudflare Workers (production). It keeps nothing in
 // memory between requests except a best-effort rate limiter.
 import { Hono } from "hono";
-import { logger } from "hono/logger";
 import type { Context, Next } from "hono";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Store, Workspace } from "./db.ts";
@@ -16,15 +15,31 @@ export interface Runtime {
   publicUrl(c: Context): string | undefined;
   /** Who may create a board: a request from this machine, the admin key, or anyone if public sign-up is on. */
   mayCreateBoard(c: Context): boolean;
-  /** Optional request log, one line per request. */
+  /** Optional request log, one line per request, with agent tokens masked. */
   log?: (line: string) => void;
+  /** Log only failed requests (status 400 and up). Production logs are metered, and successes are the noise. */
+  logOnlyFailures?: boolean;
 }
 
 type Vars = { workspace: Workspace; store: Store };
 
 export function createApp(rt: Runtime) {
   const app = new Hono<{ Variables: Vars }>();
-  if (rt.log) app.use("*", logger(rt.log)); // first, so it sees every route
+  // Agent tokens can travel in the path, so no log line ever contains one.
+  const safePath = (c: Context) => c.req.path.replace(/\/mcp\/[^/]+/, "/mcp/…");
+  if (rt.log) {
+    const log = rt.log;
+    app.use("*", async (c, next) => { // first, so it sees every route
+      const started = Date.now();
+      await next();
+      if (rt.logOnlyFailures && c.res.status < 400) return;
+      log(`${c.req.method} ${safePath(c)} ${c.res.status} ${Date.now() - started}ms`);
+    });
+  }
+  app.onError((err, c) => {
+    console.error(`${c.req.method} ${safePath(c)} threw: ${err.stack ?? err}`);
+    return c.json({ error: "Something went wrong on the board. Try again." }, 500);
+  });
 
   // Fixed-window limit per client address. In memory, so per instance (per
   // isolate on Workers): a brake on runaway clients, not a security boundary.
@@ -115,8 +130,9 @@ export function createApp(rt: Runtime) {
 
   api.post("/agents", async (c) => {
     const n = text((await json(c)).name, 31).toLowerCase();
-    if (!/^[a-z0-9][a-z0-9_-]{0,30}$/.test(n) || n === "owner") {
-      return c.json({ error: "name must be letters, digits, - or _ (max 31), and not 'owner'" }, 400);
+    // "owner" is the user and "board" is the board's own notices; an agent can't pose as either.
+    if (!/^[a-z0-9][a-z0-9_-]{0,30}$/.test(n) || n === "owner" || n === "board") {
+      return c.json({ error: "name must be letters, digits, - or _ (max 31), and not 'owner' or 'board'" }, 400);
     }
     try {
       const { agent, token } = await st(c).createAgent(ws(c), n);

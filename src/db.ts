@@ -58,6 +58,13 @@ const newId = (prefix: string) => `${prefix}_${randomBytes(5).toString("hex")}`;
 const newSecret = (prefix: string) => `${prefix}_${randomBytes(24).toString("base64url")}`;
 const now = () => new Date().toISOString();
 
+/**
+ * A claimed task with no update for this long goes back to open. An agent's
+ * session can end mid-task (the user closes the chat, a scheduled run times
+ * out), and without this the claim would hold the work forever.
+ */
+export const STALE_CLAIM_MINUTES = 30;
+
 /** First line of a message, cut at a word boundary, for titles and list previews. */
 export function headline(text: string, max: number): string {
   const line = text.trim().split("\n")[0].trim();
@@ -231,7 +238,8 @@ export class Store {
     return this.sql.get<Task>(`SELECT ${TASK_COLS} FROM tasks WHERE workspace_id = ? AND id = ?`, ws, id);
   }
 
-  listTasks(ws: string, f: { status?: TaskStatus; assigned_to?: string; limit?: number } = {}): Promise<Task[]> {
+  async listTasks(ws: string, f: { status?: TaskStatus; assigned_to?: string; limit?: number } = {}): Promise<Task[]> {
+    await this.releaseStaleClaims(ws);
     const where = ["workspace_id = ?"];
     const args: (string | number)[] = [ws];
     if (f.status) { where.push("status = ?"); args.push(f.status); }
@@ -245,7 +253,8 @@ export class Store {
    * and not waiting on an unfinished task. The cheap question an agent asks on
    * a schedule, so it reads as few rows as possible.
    */
-  inbox(ws: string, agent: string): Promise<{ id: string; title: string }[]> {
+  async inbox(ws: string, agent: string): Promise<{ id: string; title: string }[]> {
+    await this.releaseStaleClaims(ws);
     return this.sql.all(
       `SELECT id, title FROM tasks
        WHERE workspace_id = ? AND status = 'open' AND (assigned_to = ? OR assigned_to IS NULL)
@@ -275,6 +284,38 @@ export class Store {
     await this.log(ws, actor, "task_claimed", id, task.title);
     if (task.thread_id) await this.addMessage(ws, task.thread_id, id, actor, "claimed", "");
     return task;
+  }
+
+  /**
+   * Reopens claims that have gone quiet for STALE_CLAIM_MINUTES. It runs when
+   * an agent or the app looks at the board, so it needs no scheduled job, and
+   * on a board with nothing stuck it costs one indexed read.
+   *
+   * The task keeps its assignee, so work meant for Duet goes back to Duet. If
+   * the original agent finishes late, its complete_task still lands, because
+   * an open task has no claimant to conflict with.
+   */
+  async releaseStaleClaims(ws: string): Promise<void> {
+    const cutoff = new Date(Date.now() - STALE_CLAIM_MINUTES * 60_000).toISOString();
+    const stale = await this.sql.all<{ id: string; title: string; thread_id: string | null; claimed_by: string | null }>(
+      "SELECT id, title, thread_id, claimed_by FROM tasks WHERE workspace_id = ? AND status = 'in_progress' AND updated_at < ?",
+      ws, cutoff,
+    );
+    for (const t of stale) {
+      const ts = now();
+      // The same condition again, so a task that got an update a moment ago is left alone.
+      const r = await this.sql.run(
+        `UPDATE tasks SET status = 'open', claimed_by = NULL, claimed_at = NULL, opened_at = ?, updated_at = ?
+         WHERE workspace_id = ? AND id = ? AND status = 'in_progress' AND updated_at < ?`,
+        ts, ts, ws, t.id, cutoff,
+      );
+      if (!r.changes) continue;
+      const who = t.claimed_by ?? "the agent";
+      await this.log(ws, "board", "task_released", t.id, `${t.title}: no progress from ${who} in ${STALE_CLAIM_MINUTES} minutes`);
+      if (t.thread_id) {
+        await this.addMessage(ws, t.thread_id, t.id, "board", "system", `No progress from ${who} in ${STALE_CLAIM_MINUTES} minutes, so this is open again.`);
+      }
+    }
   }
 
   async updateTask(ws: string, actor: string, id: string, u: { status?: TaskStatus; note?: string; result?: string }): Promise<Task> {
@@ -377,6 +418,7 @@ export class Store {
   }
 
   async listThreads(ws: string, limit = 100): Promise<ThreadSummary[]> {
+    await this.releaseStaleClaims(ws);
     const rows = await this.sql.all<Thread>(
       "SELECT id, title, created_at, updated_at, last_read_at FROM threads WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?",
       ws, Math.min(limit, 200),
