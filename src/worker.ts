@@ -20,6 +20,9 @@ let ready: Promise<Store> | undefined;
 const app = createApp({
   store: (c) => (ready ??= Store.open(d1Sql((c.env as Env).DB)).catch((e) => { ready = undefined; throw e; })),
   publicUrl: (c) => (c.env as Env).PUBLIC_URL,
+  // Failures only, into Workers Logs (see observability in wrangler.jsonc).
+  log: (line) => console.warn(line),
+  logOnlyFailures: true,
   mayCreateBoard: (c) => {
     const env = c.env as Env;
     if (env.ALLOW_PUBLIC_SIGNUP === "true") return true;

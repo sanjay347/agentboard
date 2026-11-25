@@ -14,9 +14,8 @@ const store = await Store.open(nodeSql(process.env.DB_PATH ?? "data/agentboard.d
 const app = createApp({
   store: async () => store,
   publicUrl: () => PUBLIC_URL,
-  // One line per request, for seeing what a client actually calls. Paths can
-  // carry an agent token, so it's masked, and logging is off unless asked for.
-  log: process.env.LOG_REQUESTS === "1" ? (line) => console.log(line.replace(/\/mcp\/agent_[\w-]+/, "/mcp/agent_…")) : undefined,
+  // One line per request, for seeing what a client actually calls. Off unless asked for.
+  log: process.env.LOG_REQUESTS === "1" ? (line) => console.log(line) : undefined,
   // Local only if it came straight from this machine, not through a tunnel or proxy.
   mayCreateBoard: (c) => {
     const incoming = (c.env as { incoming?: IncomingMessage })?.incoming;
