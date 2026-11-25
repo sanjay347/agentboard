@@ -3,7 +3,7 @@
 // service is stateless and can run on any number of instances.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { headline } from "./db.ts";
+import { headline, STALE_CLAIM_MINUTES } from "./db.ts";
 import type { Agent, Message, Store } from "./db.ts";
 
 const STATUS = z.enum(["open", "in_progress", "blocked", "done"]);
@@ -163,7 +163,7 @@ export function buildMcpServer(store: Store, agent: Agent): McpServer {
     "claim_task",
     {
       title: "Claim a task",
-      description: "Mark an open task as yours and in progress. Fails if another agent already claimed it. Claim before you start work.",
+      description: `Mark an open task as yours and in progress. Fails if another agent already claimed it. Claim before you start work. If ${STALE_CLAIM_MINUTES} minutes pass with no update_task or complete_task, the task goes back to open, so post a progress note on long work.`,
       inputSchema: { id: z.string() },
     },
     guard("claim_task", (a: { id: string }) => store.claimTask(ws, me, a.id)),
